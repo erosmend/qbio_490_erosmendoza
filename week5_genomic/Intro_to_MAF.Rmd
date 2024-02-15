@@ -1,0 +1,185 @@
+---
+title: "Intro_to_MAF"
+name: "Eros Mendoza"
+date: "2024-01-19"
+---
+
+***Deliverables***
+-Upload this R Notebook to your GitHub and submit the link to your Repo on BB.
+-Include any graphs or figures created in this assignment in the folder with your R notebook with descriptive file names.
+
+Since this is an optional partner activity, it is okay if your answers are the same as your partner’s as long as everyone understands it and could explain it in their own words if asked. Each person must individually push their code to Github. *At the top of your R Notebook, write the name of you and your partner(s) as a comment.*
+
+***Complete the following coding activity and answer any following questions as comments in your R Notebook***
+
+In MAF_Tutorial.Rmd, you looked at how to analyze mutation data in terms of clinical variables as well as mutation status. In this assignment, you will need to combine the two skills to demonstrate your understanding of categorical variables and R data structures.
+
+*Pre-Assignment*
+Load all necessary packages, read in the clinical data .csv file you have in your analysis_data folder, and instantiate the MAF_object.
+```{r}
+knitr::opts_knit$set(root.dir = normalizePath("/Users/erosmendoza/Downloads/qbio_490_erosmendoza/analysis_data"))
+
+library(BiocManager)
+library(TCGAbiolinks)
+library(maftools)
+library(ggplot2)
+
+clinical <- read.csv("/Users/erosmendoza/Downloads/qbio_490_erosmendoza/analysis_data/skcm_clinical_data.csv")
+colnames(clinical)[ colnames(clinical) == "bcr_patient_barcode" ] <- "Tumor_Sample_Barcode"
+write.csv(clinical, "/Users/erosmendoza/Downloads/qbio_490_erosmendoza/analysis_data/skcm_clinical_data.csv", row.names = FALSE)
+
+
+```
+
+```{r}
+maf_query <- GDCquery(
+    project = "TCGA-SKCM", 
+    data.category = "Simple Nucleotide Variation", 
+    access = "open", # we only have access to somatic mutations which are open access
+    data.type = "Masked Somatic Mutation", 
+    workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking"
+)
+
+#GDCdownload(maf_query) # you shouldn't have to redownload any data!
+
+maf <- GDCprepare(maf_query) # as long as it runs, ignore any errors
+
+maf_object <- read.maf(maf = maf, 
+                       clinicalData = clinical,
+                       isTCGA = TRUE)
+
+
+```
+
+
+*1*
+Choose a clinical variable to separate your populations into two different groups and rewrite the column or create a new column with that variable as a factor. ***Do not use age or vital_status as your clinical variable.*** Hint: if your variable is continuous, you will need to determine your own cutoffs for the different levels of the factor. If your variable is categorical and has more than two possible values, choose the two that are the most common.
+```{r}
+table(maf_object@clinical.data$tumor_status)
+maf_object@clinical.data$tumor_status
+maf_object@clinical.data$tumor_presence <- ifelse(maf_object@clinical.data$tumor_status %in% c("WITH TUMOR"), "TUMOR PRESENT", "TUMOR NOT PRESENT")
+table(maf_object@clinical.data$tumor_presence)
+
+```
+
+
+*2*
+Create a co-oncoplot with the top 10-20 (you choose) most mutated genes for the two groups. Pick one that has a large discrepancy in % mutated or type of mutations between the groups and research it. 
+Research it. What is the gene used for? Can you think of any reason for the discrepancy?
+```{r}
+maf_clinical <- maf_object@clinical.data
+
+na_mask <- ifelse(maf_clinical$tumor_status %in% c("[Not Available]","[Unknown]", "[Discrepancy]"), F, T)
+
+maf_clinical <- maf_clinical[na_mask,]
+
+maf_clinical$tumor_status <- as.numeric(maf_clinical$tumor_status)
+
+tumor_present_barcodes <- maf_clinical[maf_clinical$tumor_presence == "TUMOR PRESENT",]
+tumor_present_barcodes <- tumor_present_barcodes$Tumor_Sample_Barcode
+
+tumor_present_maf <- subsetMaf(maf = maf_object,
+                       tsb = tumor_present_barcodes)
+
+tumor_not_present_barcodes <- maf_clinical[maf_clinical$tumor_presence == "TUMOR NOT PRESENT",]
+tumor_not_present_barcodes <- tumor_not_present_barcodes$Tumor_Sample_Barcode
+  
+tumor_not_present_maf <- subsetMaf(maf = maf_object,
+                        tsb = tumor_not_present_barcodes)
+
+m1.genes = getGeneSummary(tumor_present_maf)[1:10]
+m2.genes = getGeneSummary(tumor_not_present_maf)[1:10]
+mdt = merge(m1.genes[,.(Hugo_Symbol, MutatedSamples)], m2.genes[,.(Hugo_Symbol, MutatedSamples)], by = 'Hugo_Symbol', all = TRUE)
+mdt$MutatedSamples.x[is.na(mdt$MutatedSamples.x)] = 0
+mdt$MutatedSamples.y[is.na(mdt$MutatedSamples.y)] = 0
+mdt$max = apply(mdt[,.(MutatedSamples.x, MutatedSamples.y)], 1, max)
+mdt = mdt[order(max, decreasing = TRUE)]
+mdt
+
+coOncoplot(m1 = tumor_present_maf,
+           m2 = tumor_not_present_maf,
+           m1Name = "TUMOR PRESENT",
+           m2Name = "TUMOR NOT PRESENT",
+           genes = mdt$Hugo_Symbol,
+           borderCol = NA) 
+
+ggsave("/Users/erosmendoza/Downloads/qbio_490_erosmendoza/coOncoplot_mf_hw_SKCM.png", device = "png")
+
+# The ADGRV1 gene has a large discrepancy in 10% mutated and types of mutations between the tumor present and tumor not present groups. The ADGRV1 gene, encoding an adhesion G protein-coupled receptor, primarily functions in auditory and vestibular systems. The discrepancy in mutation rates between the tumor present and tumor not present groups may be as a result of differing tissue distributions or or tumor specific alterations that may influence ADGVR1 mutation rates in the context of skin cancer development.
+
+```
+
+*3*
+Create a contingency table with your variable and chosen gene. Run a Fisher’s Exact Test between presence of mutations for that gene and your clinical variable. Create and save a mosaic plot. 
+Interpret the output of the Fisher’s Exact Test in terms of the odds ratio and p-value.
+```{r}
+maf_object@clinical.data$tumor_presence <- factor(maf_object@clinical.data$tumor_presence)
+
+ADGRV1_mask <- ifelse(maf_object@data$Hugo_Symbol == "ADGRV1", T, F)
+maf_object_mask <- maf_object@data[ADGRV1_mask,]$Tumor_Sample_Barcode
+
+maf_object_mask2 <- levels(factor(maf_object_mask))
+mutations <- match(maf_object@clinical.data$Tumor_Sample_Barcode, maf_object_mask2)
+
+maf_object@clinical.data$ADGRV1Mutated <- ifelse(!is.na(mutations), "Mutated", "Not Mutated")
+
+contig <- table(maf_object@clinical.data$ADGRV1Mutated, maf_object@clinical.data$tumor_presence)
+
+contig
+
+fisher_test <- fisher.test(contig)
+fisher_test
+fisher_test$p.value
+mosaicplot(contig)
+
+# According to Fisher's test results, the odds ratio is 1.55929 indicating that the probability of having mutations in the ADGRV1 gene is approximately 1.55929 times greater in patients with tumor present when compared to patients with the tumor not present. The p-value is 0.02577443 which is less than the threshold of 0.05 demonstrating that there is a statistically significant association between mutations in the ADGVR1 gene and the tumor presence variable.
+
+```
+
+
+*4*
+Subset your maf_object based on your chosen clinical variable and create a co-lollipop plot of your chosen gene divided between the two different clinical variable possibilities. Include descriptive names on your plot.
+Do you notice any difference in terms of mutations (e.g. sites, types, number) between the two populations?
+```{r}
+tumor_present_barcodes <- maf_clinical[maf_clinical$tumor_presence == "TUMOR PRESENT",]
+tumor_present_barcodes <- tumor_present_barcodes$Tumor_Sample_Barcode
+
+tumor_not_present_barcodes <- maf_clinical[maf_clinical$tumor_presence == "TUMOR NOT PRESENT",]
+tumor_not_present_barcodes <- tumor_not_present_barcodes$Tumor_Sample_Barcode
+
+tumor_present_maf2 <- subsetMaf(maf = maf_object,
+                                tsb = tumor_present_barcodes) 
+tumor_not_present_maf2 <- subsetMaf(maf = maf_object,
+                                    tsb = tumor_not_present_barcodes)
+
+lollipopPlot2(m1 = tumor_present_maf2,
+              m2 = tumor_not_present_maf2,
+              m1_name = "TUMOR PRESENT",
+              m2_name = "TUMOR NOT PRESENT",
+              AACol1 = NULL,
+              AACol2 = NULL,
+             gene = "ADGRV1")
+
+# I don't notice any significant difference in terms of mutations between the tumor present and tumor not present groups. Both groups have approximately the same number of mutations in the same sites and the types of mutations are mostly the same in that they both have mostly missense mutations and a few nonsense mutations; however, the tumor not present group has one frameshift mutation.
+
+```
+
+
+*5*
+Create your Overall_Survival_Status column and create a mafSurvival KM plot based on mutations in your chosen gene.
+Does there seem to be a difference? Hypothesize why or not based on the other analysis you did with the gene above.
+```{r}
+maf_object@clinical.data$Overall_Survival_Status <- ifelse(maf_object@clinical.data$vital_status == "Alive", F, T)
+
+maf_object@clinical.data$Overall_Survival_Status
+
+mafSurvival(maf = maf_object,
+            genes = "ADGRV1", ## pick a gene of your choosing
+            time = "last_contact_days_to", ## name of the column in maf_object@clinical.data containing survival time
+            Status = "Overall_Survival_Status", ## name of the column that contains a boolean value for death events, you may need to recreate this... 
+            isTCGA = TRUE)
+
+# According to the KM plot generated from the mafSurvival analysis, there is a difference in overall survival between patients with and without mutations in the ADGRV1 gene. Patients with mutation in the ADGRV1 gene have a slightly greater probability of surviving than patients without the mutation in the ADGRV1 gene. This could suggest that mutations in ADGRV1 are associated with altered survival outcomes
+
+
+```
