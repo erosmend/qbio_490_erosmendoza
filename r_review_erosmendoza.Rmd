@@ -1,0 +1,182 @@
+---
+title: "R Review Project"
+name: "Eros Mendoza"
+---
+
+```{r}
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install(version = "3.18")
+
+if (!require("TCGAbiolinks", quietly = TRUE))
+  BiocManager::install("TCGAbiolinks")
+
+if (!require("maftools", quietly = TRUE))
+  BiocManager::install("maftools")
+
+if(!require("DESeq2", quietly = TRUE))
+  BiocManager::install("DESeq2")
+
+if(!require("EnhancedVolcano", quietly = TRUE))
+  BiocManager::install("EnhancedVolcano")
+
+library(BiocManager)
+library(TCGAbiolinks)
+library(maftools)
+library(survival)
+library(survminer)
+library(DESeq2)
+library(EnhancedVolcano)
+library(ggplot2)
+
+```
+
+
+```{r}
+clin_query <- GDCquery(project = "TCGA-SKCM",
+                       data.category = "Clinical",
+                       data.type = "Clinical Supplement",
+                       data.format = 'BCR Biotab')
+#GDCdownload(clin_query)
+clinical.BCRtab.all <- GDCprepare(clin_query)
+```
+
+```{r}
+rna_query <- GDCquery(project ="TCGA-SKCM",
+                      data.category = "Transcriptome Profiling",
+                      data.type = "Gene Expression Quantification",
+                      workflow.type = "STAR - Counts")
+#GDCdownload(rna_query)
+rna_se <- GDCprepare(rna_query)
+rna_clinical <- data.frame(rna_se@colData)
+```
+
+```{r}
+rna_clinical$Tumor_Sample_Barcode <- rna_clinical$patient
+
+maf_query <- GDCquery(
+  project = 'TCGA-SKCM',
+  data.category = "Simple Nucleotide Variation",
+  access = "open", # we only have access to somatic mutations which are open access
+  data.type = "Masked Somatic Mutation",
+  workflow.type = "Aliquot Ensemble Somatic Variant Merging and Masking"
+)
+
+#GDCdownload(maf_query)
+
+maf <- GDCprepare(maf_query) # as long as it runs, ignore any errors
+
+maf_object <- read.maf(maf = maf,
+                       clinicalData = rna_clinical,
+                       isTCGA = TRUE)
+```
+
+```{r}
+rad <- clinical.BCRtab.all$clinical_radiation_skcm[-c(1,2),]
+drug <- clinical.BCRtab.all$clinical_drug_skcm[-c(1,2),]
+
+metastatic_samples <- subset(rna_clinical, definition %in% c("Metastatic"))
+non_metastatic_samples <-subset(rna_clinical, definition %in% c("Primary solid Tumor"))
+samples <- subset(rna_clinical, definition %in% c("Metastatic", "Primary solid Tumor"))
+
+```
+
+```{r}
+metastatic_maf <- subsetMaf(maf_object, tsb = metastatic_samples$Tumor_Sample_Barcode)
+non_metastatic_maf <- subsetMaf(maf_object, tsb = non_metastatic_samples$Tumor_Sample_Barcode)
+
+samples$surv_time <- ifelse(!is.na(samples$days_to_death), samples$days_to_death, samples$days_to_last_follow_up)
+samples <- samples[!is.na(samples$surv_time),]
+
+survival_object <- Surv(time = samples$surv_time, event = ifelse(samples$vital_status == "Dead", 1, 0))
+
+survival_plot <- survfit(survival_object ~ samples$definition)
+ggsurvplot(survival_plot, data = samples, title = "Survival Analysis by Metastasis Status", xlab = "Time (days)", ylab = "Survival Probability")
+
+```
+
+```{r}
+coOncoplot(
+  m1 = metastatic_maf,
+  m2 = non_metastatic_maf,
+  m1Name = "Metastatic",
+  m2Name = "Non-Metastatic",
+  borderCol = NA)
+
+```
+
+```{r}
+metastatic_barcodes <- metastatic_samples$Tumor_Sample_Barcode
+non_metastatic_barcodes <- non_metastatic_samples$Tumor_Sample_Barcode
+
+metastatic_maf <- subsetMaf(maf = maf_object,
+                            tsb = metastatic_barcodes) 
+non_metastatic_maf <- subsetMaf(maf = maf_object,
+                                tsb = non_metastatic_barcodes)
+
+lollipopPlot2(m1 = metastatic_maf,
+              m2 = non_metastatic_maf,
+              m1_name = "Metastatic",
+              m2_name = "Non-Metastatic",
+              AACol1 = "HGVSp_Short",
+              AACol2 = "HGVSp_Short",
+              gene = "BRAF")
+
+```
+
+```{r}
+somatic_interactions_metastatic <- somaticInteractions(maf = metastatic_maf)
+somatic_interactions_non_metastatic <- somaticInteractions(maf = non_metastatic_maf)
+
+```
+
+```{r}
+metastasis_mask <- !is.na(rna_se@colData$definition) & (rna_se@colData$definition == "Metastatic" | rna_se@colData$definition == "Primary solid Tumor")
+rna_clinical <- as.data.frame(rna_se@colData[metastasis_mask, ])
+
+rna_counts <- as.data.frame(rna_se@assays@data$unstranded[, metastasis_mask])
+colnames(rna_counts) <- rna_clinical$barcode
+rownames(rna_counts) <- rna_se@rowRanges@elementMetadata$gene_id
+
+total_expression <- rowSums(rna_counts)
+rna_counts_filtered <- rna_counts[total_expression >= 20, ]
+
+rna_clinical$definition <- factor(rna_clinical$definition)
+
+rna_clinical$radiation <- ifelse(rna_clinical$patient %in% rad$bcr_patient_barcode, 1, 0)
+
+chemo_patients <- drug[drug$pharmaceutical_therapy_type == "Chemotherapy",]$bcr_patient_barcode
+immuno_patients <- drug[drug$pharmaceutical_therapy_type == "Immunotherapy", ]$bcr_patient_barcode
+molec_patients <- drug[drug$pharmaceutical_therapy_type == "Targeted Molecular therapy",]$bcr_patient_barcode
+vac_patients <- drug[drug$pharmaceutical_therapy_type == "Vaccine",]$bcr_patient_barcode
+
+rna_clinical$chemotherapy <- ifelse(rna_clinical$patient %in% chemo_patients, 1, 0)
+rna_clinical$immunotherapy <- ifelse(rna_clinical$patient %in% immuno_patients, 1, 0)
+rna_clinical$molecular_therapy <- ifelse(rna_clinical$patient %in% molec_patients, 1, 0)
+rna_clinical$vaccine <- ifelse(rna_clinical$patient %in% vac_patients, 1, 0)
+
+sum(is.na(rna_clinical$vital_status))
+
+design <- ~ race + gender + vital_status + radiation + chemotherapy + immunotherapy + molecular_therapy + vaccine + definition
+
+dds <- DESeqDataSetFromMatrix(countData = rna_counts_filtered,
+                              colData = rna_clinical,
+                              design= design)
+
+dds_obj <- DESeq(dds)
+
+results <- results(dds_obj, format = "DataFrame", contrast = c("definition", "Metastatic" , "Primary solid Tumor"))
+results$gene_names <- rownames(results)
+results <- as.data.frame(results)
+
+EnhancedVolcano(results,
+                lab = results$gene_names,
+                x = 'log2FoldChange',
+                y = 'pvalue',
+                title = 'Vital Status: Alive vs Dead',
+                pointSize = 1.0,
+                labSize = 5.0)
+# Please note I continually got an error with the volcano plot and was told to upload my code as is and use the example volcano plot in my written portion.
+```
+
